@@ -126,7 +126,7 @@ with aba3:
         if st.form_submit_button("Cadastrar Tarefa"):
             if tit and resp:
                 salvar_tarefa(tit, desc, resp, tema, d_ini, d_fim, prio, "A Fazer")
-                st.success("Tarefa cadastrada com sucesso!")
-                st.rerun()
-            else:
-                st.error("Por favor, preencha os campos obrigatórios (*).")
+            st.success("Tarefa cadastrada com sucesso!")
+            st.rerun()
+        else:
+            st.error("Por favor, preencha os campos obrigatórios (*).")
