@@ -20,9 +20,12 @@ except Exception as e:
     st.stop()
 
 # 3. FUNÇÕES DE BANCO DE DADOS
-def carregar_tarefas():
+def carregar_tarefas(incluir_arquivadas=False):
     try:
-        res = supabase.table("tarefas").select("*").order("id", desc=True).execute()
+        query = supabase.table("tarefas").select("*")
+        if not incluir_arquivadas:
+            query = query.neq("status", "Arquivada")
+        res = query.order("id", desc=True).execute()
         return pd.DataFrame(res.data)
     except Exception as e:
         st.error(f"Erro ao carregar tarefas: {e}")
@@ -60,15 +63,30 @@ def atualizar_tarefa(id_tarefa, novo_status, nova_porcentagem, novo_historico=""
     except Exception as e:
         st.error(f"Erro ao atualizar tarefa: {e}")
 
+def arquivar_tarefa(id_tarefa):
+    try:
+        supabase.table("tarefas").update({"status": "Arquivada"}).eq("id", id_tarefa).execute()
+        st.success(f"Tarefa #{id_tarefa} arquivada com sucesso!")
+    except Exception as e:
+        st.error(f"Erro ao arquivar tarefa: {e}")
+
+def excluir_tarefa(id_tarefa):
+    try:
+        supabase.table("tarefas").delete().eq("id", id_tarefa).execute()
+        st.success(f"Tarefa #{id_tarefa} excluída permanentemente!")
+    except Exception as e:
+        st.error(f"Erro ao excluir tarefa: {e}")
+
 # 4. INTERFACE DO APLICATIVO
 st.title("📋 Gerenciador de Tarefas do Setor")
 
 # Menu de Navegação / Abas
-aba1, aba2, aba3, aba4 = st.tabs([
+aba1, aba2, aba3, aba4, aba5 = st.tabs([
     "📌 Painel de Tarefas", 
     "📊 Dashboard / Gráficos", 
     "➕ Nova Tarefa", 
-    "✏️ Atualizar Progresso"
+    "✏️ Atualizar Progresso",
+    "🗑️ Excluir / Arquivar"
 ])
 
 # ABA 1: PAINEL DE TAREFAS (COM FILTROS)
@@ -94,7 +112,6 @@ with aba1:
             lista_status = ["Todos", "A Fazer", "Em Andamento", "Pendente / Bloqueada", "Concluída"]
             filtro_status = st.selectbox("📌 Status", lista_status)
 
-        # Aplicação dos filtros no DataFrame
         df_filtrado = df.copy()
 
         if busca:
@@ -135,7 +152,7 @@ with aba1:
         
         st.dataframe(df_filtrado, use_container_width=True, column_config=col_config)
     else:
-        st.info("Nenhuma tarefa encontrada ou cadastrada ainda.")
+        st.info("Nenhuma tarefa ativa encontrada.")
 
 # ABA 2: DASHBOARD E GRÁFICOS VISUAIS
 with aba2:
@@ -257,3 +274,42 @@ with aba4:
                     st.rerun()
     else:
         st.info("Nenhuma tarefa disponível para atualização.")
+
+# ABA 5: EXCLUIR OU ARQUIVAR TAREFAS
+with aba5:
+    st.subheader("🗑️ Gerenciar Exclusão e Arquivamento")
+    df_gestao = carregar_tarefas()
+    
+    if not df_gestao.empty:
+        opcoes_gestao = {
+            f"#{row['id']} | {row['titulo']} [{row['status']}]": row 
+            for _, row in df_gestao.iterrows()
+        }
+        
+        tarefa_gestao_label = st.selectbox(
+            "Selecione a tarefa:",
+            options=list(opcoes_gestao.keys()),
+            key="select_gestao"
+        )
+        
+        if tarefa_gestao_label:
+            dados_g = opcoes_gestao[tarefa_gestao_label]
+            st.warning(f"**Tarefa selecionada:** #{dados_g['id']} - {dados_g['titulo']} (Status atual: {dados_g['status']})")
+            
+            col_b1, col_b2 = st.columns(2)
+            
+            with col_b1:
+                st.markdown("##### 📁 Arquivar Tarefa")
+                st.caption("Remove a tarefa do painel principal sem apagar do banco de dados.")
+                if st.button("📦 Arquivar Tarefa", use_container_width=True):
+                    arquivar_tarefa(dados_g['id'])
+                    st.rerun()
+                    
+            with col_b2:
+                st.markdown("##### ❌ Excluir Permanentemente")
+                confirmar = st.checkbox(f"Confirmo a exclusão definitiva da tarefa #{dados_g['id']}")
+                if st.button("🗑️ Excluir Tarefa", type="primary", use_container_width=True, disabled=not confirmar):
+                    excluir_tarefa(dados_g['id'])
+                    st.rerun()
+    else:
+        st.info("Nenhuma tarefa disponível para exclusão ou arquivamento.")
