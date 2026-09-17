@@ -31,6 +31,28 @@ def carregar_tarefas(incluir_arquivadas=False):
         st.error(f"Erro ao carregar tarefas: {e}")
         return pd.DataFrame()
 
+def carregar_logs():
+    try:
+        res = supabase.table("logs_tarefas").select("*").order("id", desc=True).execute()
+        return pd.DataFrame(res.data)
+    except Exception as e:
+        st.error(f"Erro ao carregar relatório de auditoria: {e}")
+        return pd.DataFrame()
+
+def registrar_log(tarefa_id, titulo_tarefa, acao, responsavel_acao, detalhes):
+    try:
+        dados_log = {
+            "tarefa_id": int(tarefa_id) if tarefa_id else None,
+            "titulo_tarefa": titulo_tarefa,
+            "acao": acao,
+            "responsavel_acao": responsavel_acao,
+            "detalhes": detalhes
+        }
+        supabase.table("logs_tarefas").insert(dados_log).execute()
+    except Exception as e:
+        # Silencioso no UI para não travar a ação principal, mas grava o erro se necessário
+        print(f"Erro ao registrar log: {e}")
+
 def salvar_tarefa(titulo, descricao, responsavel, tema, data_inicio, deadline, prioridade, status="A Fazer"):
     try:
         dados = {
@@ -44,12 +66,22 @@ def salvar_tarefa(titulo, descricao, responsavel, tema, data_inicio, deadline, p
             "status": status,
             "porcentagem": 0
         }
-        supabase.table("tarefas").insert(dados).execute()
+        res = supabase.table("tarefas").insert(dados).execute()
+        
+        # Registra no log
+        nova_id = res.data[0]['id'] if res.data else None
+        registrar_log(
+            nova_id, 
+            titulo, 
+            "CRIAÇÃO", 
+            responsavel, 
+            f"Tarefa criada com prioridade '{prioridade}' e prazo '{deadline}'."
+        )
         st.success("Tarefa cadastrada com sucesso!")
     except Exception as e:
         st.error(f"Erro ao salvar tarefa no banco de dados: {e}")
 
-def atualizar_tarefa(id_tarefa, novo_status, nova_porcentagem, novo_historico=""):
+def atualizar_tarefa(id_tarefa, titulo_tarefa, novo_status, nova_porcentagem, usuario_acao, novo_historico=""):
     try:
         dados_atualizados = {
             "status": novo_status,
@@ -59,20 +91,45 @@ def atualizar_tarefa(id_tarefa, novo_status, nova_porcentagem, novo_historico=""
             dados_atualizados["historico"] = novo_historico
 
         supabase.table("tarefas").update(dados_atualizados).eq("id", id_tarefa).execute()
+        
+        # Registra no log detalhado
+        detalhe = f"Status alterado para '{novo_status}' | Progresso: {nova_porcentagem}%"
+        if novo_historico:
+            detalhe += f" | Obs: {novo_historico}"
+            
+        registrar_log(id_tarefa, titulo_tarefa, "ATUALIZAÇÃO", usuario_acao, detalhe)
         st.success(f"Tarefa #{id_tarefa} atualizada com sucesso!")
     except Exception as e:
         st.error(f"Erro ao atualizar tarefa: {e}")
 
-def arquivar_tarefa(id_tarefa):
+def arquivar_tarefa(id_tarefa, titulo_tarefa, usuario_acao):
     try:
         supabase.table("tarefas").update({"status": "Arquivada"}).eq("id", id_tarefa).execute()
+        
+        # Registra no log
+        registrar_log(
+            id_tarefa, 
+            titulo_tarefa, 
+            "ARQUIVAMENTO", 
+            usuario_acao, 
+            "Tarefa arquivada e removida do painel principal."
+        )
         st.success(f"Tarefa #{id_tarefa} arquivada com sucesso!")
     except Exception as e:
         st.error(f"Erro ao arquivar tarefa: {e}")
 
-def excluir_tarefa(id_tarefa):
+def excluir_tarefa(id_tarefa, titulo_tarefa, usuario_acao):
     try:
         supabase.table("tarefas").delete().eq("id", id_tarefa).execute()
+        
+        # Registra no log
+        registrar_log(
+            id_tarefa, 
+            titulo_tarefa, 
+            "EXCLUSÃO PERMANENTE", 
+            usuario_acao, 
+            "Tarefa excluída definitivamente do banco de dados."
+        )
         st.success(f"Tarefa #{id_tarefa} excluída permanentemente!")
     except Exception as e:
         st.error(f"Erro ao excluir tarefa: {e}")
@@ -81,12 +138,13 @@ def excluir_tarefa(id_tarefa):
 st.title("📋 Gerenciador de Tarefas do Setor")
 
 # Menu de Navegação / Abas
-aba1, aba2, aba3, aba4, aba5 = st.tabs([
+aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs([
     "📌 Painel de Tarefas", 
     "📊 Dashboard / Gráficos", 
     "➕ Nova Tarefa", 
     "✏️ Atualizar Progresso",
-    "🗑️ Excluir / Arquivar"
+    "🗑️ Excluir / Arquivar",
+    "📜 Relatório de Auditoria"
 ])
 
 # ABA 1: PAINEL DE TAREFAS (COM FILTROS)
@@ -255,6 +313,8 @@ with aba4:
             st.info(f"**Descrição atual:** {dados_tarefa.get('descricao', 'Sem descrição')}")
             
             with st.form("form_atualizar_tarefa"):
+                usuario_acao = st.text_input("Seu Nome / Identificação (Quem está realizando a alteração) *")
+                
                 c1, c2 = st.columns(2)
                 
                 with c1:
@@ -270,8 +330,11 @@ with aba4:
                 novo_historico = st.text_area("Observações / Histórico de Progresso", value=dados_tarefa.get('historico', '') or '')
                 
                 if st.form_submit_button("Salvar Atualizações"):
-                    atualizar_tarefa(dados_tarefa['id'], novo_status, nova_porcentagem, novo_historico)
-                    st.rerun()
+                    if usuario_acao.strip():
+                        atualizar_tarefa(dados_tarefa['id'], dados_tarefa['titulo'], novo_status, nova_porcentagem, usuario_acao, novo_historico)
+                        st.rerun()
+                    else:
+                        st.error("Por favor, informe seu nome para registrar a alteração no relatório de auditoria.")
     else:
         st.info("Nenhuma tarefa disponível para atualização.")
 
@@ -296,20 +359,46 @@ with aba5:
             dados_g = opcoes_gestao[tarefa_gestao_label]
             st.warning(f"**Tarefa selecionada:** #{dados_g['id']} - {dados_g['titulo']} (Status atual: {dados_g['status']})")
             
+            usuario_gestao = st.text_input("Seu Nome / Identificação *", key="usr_gestao")
+            
             col_b1, col_b2 = st.columns(2)
             
             with col_b1:
                 st.markdown("##### 📁 Arquivar Tarefa")
                 st.caption("Remove a tarefa do painel principal sem apagar do banco de dados.")
                 if st.button("📦 Arquivar Tarefa", use_container_width=True):
-                    arquivar_tarefa(dados_g['id'])
-                    st.rerun()
+                    if usuario_gestao.strip():
+                        arquivar_tarefa(dados_g['id'], dados_g['titulo'], usuario_gestao)
+                        st.rerun()
+                    else:
+                        st.error("Por favor, informe seu nome.")
                     
             with col_b2:
                 st.markdown("##### ❌ Excluir Permanentemente")
                 confirmar = st.checkbox(f"Confirmo a exclusão definitiva da tarefa #{dados_g['id']}")
                 if st.button("🗑️ Excluir Tarefa", type="primary", use_container_width=True, disabled=not confirmar):
-                    excluir_tarefa(dados_g['id'])
-                    st.rerun()
+                    if usuario_gestao.strip():
+                        excluir_tarefa(dados_g['id'], dados_g['titulo'], usuario_gestao)
+                        st.rerun()
+                    else:
+                        st.error("Por favor, informe seu nome.")
     else:
         st.info("Nenhuma tarefa disponível para exclusão ou arquivamento.")
+
+# ABA 6: RELATÓRIO DE AUDITORIA / LOGS
+with aba6:
+    st.subheader("📜 Histórico Geral de Alterações e Exclusões")
+    df_logs = carregar_logs()
+    
+    if not df_logs.empty:
+        col_l1, col_l2 = st.columns(2)
+        with col_l1:
+            filtro_acao = st.selectbox("Filtrar por Ação", ["Todas", "CRIAÇÃO", "ATUALIZAÇÃO", "ARQUIVAMENTO", "EXCLUSÃO PERMANENTE"])
+        
+        df_logs_filtrado = df_logs.copy()
+        if filtro_acao != "Todas":
+            df_logs_filtrado = df_logs_filtrado[df_logs_filtrado["acao"].str.contains(filtro_acao, na=False)]
+            
+        st.dataframe(df_logs_filtrado, use_container_width=True)
+    else:
+        st.info("Nenhuma alteração registrada até o momento.")
