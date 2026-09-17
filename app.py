@@ -17,26 +17,12 @@ supabase = init_supabase()
 
 # 3. FUNÇÕES DE BANCO DE DADOS
 def carregar_tarefas():
-    res = supabase.table("tarefas").select("*").order("id", desc=True).execute()
-    return pd.DataFrame(res.data)
-
-def salvar_tarefa(titulo, descricao, responsavel, tema, data_ini, deadline, prioridade, status):
-    dados = {
-        "titulo": titulo,
-        "descricao": descricao,
-        "responsavel": responsavel,
-        "tema": tema,
-        "data_inicio": str(data_ini),
-        "deadline": str(deadline),
-        "prioridade": prioridade,
-        "status": status,
-        "porcentagem": 0,
-        "historico": f"[{datetime.now().strftime('%d/%m/%Y %H:%M')}] Tarefa criada."
-    }
-    supabase.table("tarefas").insert(dados).execute()
-
-def atualizar_tarefa(id_tarefa, novo_status, nova_porcentagem, novo_comentario, historico_atual):
-    novo_historico = f"[{datetime.now().strftime('%d/%m/%Y %H:%M')}] Status: {novo_status} ({nova_porcentagem}%). {novo_comentario}\n" + str(historico_atual or "")
+    try:
+        res = supabase.table("tarefas").select("*").order("id", desc=True).execute()
+        return pd.DataFrame(res.data)
+    except Exception as e:
+        st.error(f"Erro ao conectar ou consultar o Supabase: {e}")
+        return pd.DataFrame()
     dados = {
         "status": novo_status,
         "porcentagem": nova_porcentagem,
