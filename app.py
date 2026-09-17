@@ -51,7 +51,6 @@ def atualizar_tarefa(id_tarefa, novo_status, nova_porcentagem, novo_historico=""
             "status": novo_status,
             "porcentagem": int(nova_porcentagem)
         }
-        # Se tiver comentário/histórico, adiciona ao payload
         if novo_historico:
             dados_atualizados["historico"] = novo_historico
 
@@ -66,19 +65,64 @@ st.title("📋 Gerenciador de Tarefas do Setor")
 # Menu de Navegação / Abas
 aba1, aba2, aba3 = st.tabs(["📌 Painel de Tarefas", "➕ Nova Tarefa", "✏️ Atualizar Progresso"])
 
-# ABA 1: PAINEL DE TAREFAS
+# ABA 1: PAINEL DE TAREFAS (COM FILTROS)
 with aba1:
     df = carregar_tarefas()
     if not df.empty:
-        # Exibe métricas de resumo
-        col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric("Total de Tarefas", len(df))
-        col_m2.metric("Em Andamento", len(df[df["status"] == "Em Andamento"]))
-        col_m3.metric("Concluídas", len(df[df["status"] == "Concluída"]))
+        # --- SEÇÃO DE FILTROS ---
+        st.subheader("🔍 Filtros e Busca")
+        
+        col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+        
+        with col_f1:
+            # Busca por palavra-chave no título ou descrição
+            busca = st.text_input("🔎 Buscar palavra-chave", placeholder="Ex: relatório, reunião...")
+        
+        with col_f2:
+            # Filtro por Responsável
+            lista_responsaveis = ["Todos"] + sorted(list(df["responsavel"].dropna().unique()))
+            filtro_resp = st.selectbox("👤 Responsável", lista_responsaveis)
+            
+        with col_f3:
+            # Filtro por Prioridade
+            lista_prioridades = ["Todas", "Baixa", "Média", "Alta", "Urgente"]
+            filtro_prio = st.selectbox("⚡ Prioridade", lista_prioridades)
+
+        with col_f4:
+            # Filtro por Status
+            lista_status = ["Todos", "A Fazer", "Em Andamento", "Pendente / Bloqueada", "Concluída"]
+            filtro_status = st.selectbox("📌 Status", lista_status)
+
+        # Aplicação dos filtros no DataFrame
+        df_filtrado = df.copy()
+
+        if busca:
+            termo = busca.lower()
+            mascara_titulo = df_filtrado["titulo"].fillna("").str.lower().str.contains(termo)
+            mascara_desc = df_filtrado["descricao"].fillna("").str.lower().str.contains(termo)
+            df_filtrado = df_filtrado[mascara_titulo | mascara_desc]
+
+        if filtro_resp != "Todos":
+            df_filtrado = df_filtrado[df_filtrado["responsavel"] == filtro_resp]
+
+        if filtro_prio != "Todas":
+            df_filtrado = df_filtrado[df_filtrado["prioridade"] == filtro_prio]
+
+        if filtro_status != "Todos":
+            df_filtrado = df_filtrado[df_filtrado["status"] == filtro_status]
+
+        st.markdown("---")
+
+        # --- CARDS DE MÉTRICAS (Refletem os filtros ativos) ---
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        col_m1.metric("Exibindo", len(df_filtrado))
+        col_m2.metric("A Fazer / Pendentes", len(df_filtrado[df_filtrado["status"].isin(["A Fazer", "Pendente / Bloqueada"])]))
+        col_m3.metric("Em Andamento", len(df_filtrado[df_filtrado["status"] == "Em Andamento"]))
+        col_m4.metric("Concluídas", len(df_filtrado[df_filtrado["status"] == "Concluída"]))
         
         st.markdown("---")
-        
-        # Configuração de exibição das colunas no dataframe
+
+        # --- TABELA DE DADOS ---
         col_config = {
             "porcentagem": st.column_config.ProgressColumn(
                 "Progresso (%)",
@@ -89,7 +133,7 @@ with aba1:
             )
         }
         
-        st.dataframe(df, use_container_width=True, column_config=col_config)
+        st.dataframe(df_filtrado, use_container_width=True, column_config=col_config)
     else:
         st.info("Nenhuma tarefa encontrada ou cadastrada ainda.")
 
@@ -122,7 +166,6 @@ with aba3:
     df_atualizar = carregar_tarefas()
     
     if not df_atualizar.empty:
-        # Cria uma lista formatada de opções: "ID 12 - Título da Tarefa"
         opcoes_tarefas = {
             f"#{row['id']} | {row['titulo']} ({row['responsavel']})": row 
             for _, row in df_atualizar.iterrows()
@@ -142,7 +185,6 @@ with aba3:
                 c1, c2 = st.columns(2)
                 
                 with c1:
-                    # Define o status atual como padrão
                     status_opcoes = ["A Fazer", "Em Andamento", "Pendente / Bloqueada", "Concluída"]
                     status_index = status_opcoes.index(dados_tarefa['status']) if dados_tarefa['status'] in status_opcoes else 0
                     
