@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
 from supabase import create_client, Client
 
 # 1. CONFIGURAÇÃO DA PÁGINA
@@ -63,33 +64,33 @@ def atualizar_tarefa(id_tarefa, novo_status, nova_porcentagem, novo_historico=""
 st.title("📋 Gerenciador de Tarefas do Setor")
 
 # Menu de Navegação / Abas
-aba1, aba2, aba3 = st.tabs(["📌 Painel de Tarefas", "➕ Nova Tarefa", "✏️ Atualizar Progresso"])
+aba1, aba2, aba3, aba4 = st.tabs([
+    "📌 Painel de Tarefas", 
+    "📊 Dashboard / Gráficos", 
+    "➕ Nova Tarefa", 
+    "✏️ Atualizar Progresso"
+])
 
 # ABA 1: PAINEL DE TAREFAS (COM FILTROS)
 with aba1:
     df = carregar_tarefas()
     if not df.empty:
-        # --- SEÇÃO DE FILTROS ---
         st.subheader("🔍 Filtros e Busca")
         
         col_f1, col_f2, col_f3, col_f4 = st.columns(4)
         
         with col_f1:
-            # Busca por palavra-chave no título ou descrição
             busca = st.text_input("🔎 Buscar palavra-chave", placeholder="Ex: relatório, reunião...")
         
         with col_f2:
-            # Filtro por Responsável
             lista_responsaveis = ["Todos"] + sorted(list(df["responsavel"].dropna().unique()))
             filtro_resp = st.selectbox("👤 Responsável", lista_responsaveis)
             
         with col_f3:
-            # Filtro por Prioridade
             lista_prioridades = ["Todas", "Baixa", "Média", "Alta", "Urgente"]
             filtro_prio = st.selectbox("⚡ Prioridade", lista_prioridades)
 
         with col_f4:
-            # Filtro por Status
             lista_status = ["Todos", "A Fazer", "Em Andamento", "Pendente / Bloqueada", "Concluída"]
             filtro_status = st.selectbox("📌 Status", lista_status)
 
@@ -113,7 +114,7 @@ with aba1:
 
         st.markdown("---")
 
-        # --- CARDS DE MÉTRICAS (Refletem os filtros ativos) ---
+        # Cards de Métricas
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.metric("Exibindo", len(df_filtrado))
         col_m2.metric("A Fazer / Pendentes", len(df_filtrado[df_filtrado["status"].isin(["A Fazer", "Pendente / Bloqueada"])]))
@@ -122,7 +123,6 @@ with aba1:
         
         st.markdown("---")
 
-        # --- TABELA DE DADOS ---
         col_config = {
             "porcentagem": st.column_config.ProgressColumn(
                 "Progresso (%)",
@@ -137,8 +137,64 @@ with aba1:
     else:
         st.info("Nenhuma tarefa encontrada ou cadastrada ainda.")
 
-# ABA 2: CADASTRO DE NOVA TAREFA
+# ABA 2: DASHBOARD E GRÁFICOS VISUAIS
 with aba2:
+    st.subheader("📊 Indicadores Visuais do Setor")
+    df_dash = carregar_tarefas()
+    
+    if not df_dash.empty:
+        col_g1, col_g2 = st.columns(2)
+        
+        with col_g1:
+            st.markdown("##### 📌 Distribuição por Status")
+            chart_status = alt.Chart(df_dash).mark_arc(innerRadius=50).encode(
+                theta=alt.Theta(field="id", aggregate="count", type="quantitative"),
+                color=alt.Color(
+                    field="status", 
+                    type="nominal", 
+                    scale=alt.Scale(
+                        domain=["A Fazer", "Em Andamento", "Pendente / Bloqueada", "Concluída"],
+                        range=["#1f77b4", "#ff7f0e", "#d62728", "#2ca02c"]
+                    ),
+                    title="Status"
+                ),
+                tooltip=["status", alt.Tooltip("count(id)", title="Quantidade")]
+            ).properties(height=320)
+            st.altair_chart(chart_status, use_container_width=True)
+            
+        with col_g2:
+            st.markdown("##### ⚡ Tarefas por Prioridade")
+            chart_prio = alt.Chart(df_dash).mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5).encode(
+                x=alt.X("prioridade:N", title="Prioridade", sort=["Baixa", "Média", "Alta", "Urgente"]),
+                y=alt.Y("count(id):Q", title="Quantidade de Tarefas"),
+                color=alt.Color(
+                    "prioridade:N", 
+                    scale=alt.Scale(
+                        domain=["Baixa", "Média", "Alta", "Urgente"],
+                        range=["#2ecc71", "#3498db", "#e67e22", "#e74c3c"]
+                    ),
+                    legend=None
+                ),
+                tooltip=["prioridade", alt.Tooltip("count(id)", title="Quantidade")]
+            ).properties(height=320)
+            st.altair_chart(chart_prio, use_container_width=True)
+
+        st.markdown("---")
+        
+        st.markdown("##### 👤 Carga de Trabalho por Responsável")
+        chart_resp = alt.Chart(df_dash).mark_bar().encode(
+            x=alt.X("responsavel:N", title="Responsável"),
+            y=alt.Y("count(id):Q", title="Total de Tarefas"),
+            color=alt.Color("status:N", title="Status"),
+            tooltip=["responsavel", "status", alt.Tooltip("count(id)", title="Quantidade")]
+        ).properties(height=350)
+        st.altair_chart(chart_resp, use_container_width=True)
+        
+    else:
+        st.info("Nenhuma tarefa disponível para gerar gráficos.")
+
+# ABA 3: CADASTRO DE NOVA TAREFA
+with aba3:
     st.subheader("Cadastrar Nova Tarefa")
     with st.form("form_nova_tarefa", clear_on_submit=True):
         tit = st.text_input("Título da Tarefa *")
@@ -160,8 +216,8 @@ with aba2:
             else:
                 st.error("Por favor, preencha os campos obrigatórios (*).")
 
-# ABA 3: ATUALIZAR STATUS E PROGRESSO
-with aba3:
+# ABA 4: ATUALIZAR STATUS E PROGRESSO
+with aba4:
     st.subheader("Atualizar Progresso de Tarefa Existente")
     df_atualizar = carregar_tarefas()
     
