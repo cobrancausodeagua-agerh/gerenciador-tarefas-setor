@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
+from datetime import datetime, date
 from supabase import create_client, Client
 
 # 1. CONFIGURAÇÃO DA PÁGINA
@@ -26,7 +27,28 @@ def carregar_tarefas(incluir_arquivadas=False):
         if not incluir_arquivadas:
             query = query.neq("status", "Arquivada")
         res = query.order("id", desc=True).execute()
-        return pd.DataFrame(res.data)
+        df_res = pd.DataFrame(res.data)
+        
+        # Adiciona verificação visual de atraso
+        if not df_res.empty and "deadline" in df_res.columns:
+            hoje = date.today()
+            def verificar_atraso(row):
+                if row.get("status") in ["Concluída", "Arquivada"]:
+                    return "✅ Concluída / Ok"
+                try:
+                    prazo = datetime.strptime(str(row["deadline"]), "%Y-%m-%d").date()
+                    if prazo < hoje:
+                        return "🚨 Em Atraso"
+                    elif prazo == hoje:
+                        return "⚠️ Vence Hoje"
+                    else:
+                        return "🟢 No Prazo"
+                except Exception:
+                    return "⚪ Sem Prazo"
+            
+            df_res["alerta_prazo"] = df_res.apply(verificar_atraso, axis=1)
+        
+        return df_res
     except Exception as e:
         st.error(f"Erro ao carregar tarefas: {e}")
         return pd.DataFrame()
@@ -50,7 +72,6 @@ def registrar_log(tarefa_id, titulo_tarefa, acao, responsavel_acao, detalhes):
         }
         supabase.table("logs_tarefas").insert(dados_log).execute()
     except Exception as e:
-        # Silencioso no UI para não travar a ação principal, mas grava o erro se necessário
         print(f"Erro ao registrar log: {e}")
 
 def salvar_tarefa(titulo, descricao, responsavel, tema, data_inicio, deadline, prioridade, status="A Fazer"):
@@ -68,7 +89,6 @@ def salvar_tarefa(titulo, descricao, responsavel, tema, data_inicio, deadline, p
         }
         res = supabase.table("tarefas").insert(dados).execute()
         
-        # Registra no log
         nova_id = res.data[0]['id'] if res.data else None
         registrar_log(
             nova_id, 
@@ -92,7 +112,6 @@ def atualizar_tarefa(id_tarefa, titulo_tarefa, novo_status, nova_porcentagem, us
 
         supabase.table("tarefas").update(dados_atualizados).eq("id", id_tarefa).execute()
         
-        # Registra no log detalhado
         detalhe = f"Status alterado para '{novo_status}' | Progresso: {nova_porcentagem}%"
         if novo_historico:
             detalhe += f" | Obs: {novo_historico}"
@@ -106,7 +125,6 @@ def arquivar_tarefa(id_tarefa, titulo_tarefa, usuario_acao):
     try:
         supabase.table("tarefas").update({"status": "Arquivada"}).eq("id", id_tarefa).execute()
         
-        # Registra no log
         registrar_log(
             id_tarefa, 
             titulo_tarefa, 
@@ -122,7 +140,6 @@ def excluir_tarefa(id_tarefa, titulo_tarefa, usuario_acao):
     try:
         supabase.table("tarefas").delete().eq("id", id_tarefa).execute()
         
-        # Registra no log
         registrar_log(
             id_tarefa, 
             titulo_tarefa, 
@@ -147,16 +164,16 @@ aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs([
     "📜 Relatório de Auditoria"
 ])
 
-# ABA 1: PAINEL DE TAREFAS (COM FILTROS)
+# ABA 1: PAINEL DE TAREFAS (COM ALERTA DE ATRASO)
 with aba1:
     df = carregar_tarefas()
     if not df.empty:
         st.subheader("🔍 Filtros e Busca")
         
-        col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+        col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns(5)
         
         with col_f1:
-            busca = st.text_input("🔎 Buscar palavra-chave", placeholder="Ex: relatório, reunião...")
+            busca = st.text_input("🔎 Palavra-chave", placeholder="Ex: relatório...")
         
         with col_f2:
             lista_responsaveis = ["Todos"] + sorted(list(df["responsavel"].dropna().unique()))
@@ -169,6 +186,9 @@ with aba1:
         with col_f4:
             lista_status = ["Todos", "A Fazer", "Em Andamento", "Pendente / Bloqueada", "Concluída"]
             filtro_status = st.selectbox("📌 Status", lista_status)
+
+        with col_f5:
+            filtro_prazo = st.selectbox("⏳ Situação do Prazo", ["Todas", "🚨 Em Atraso", "⚠️ Vence Hoje", "🟢 No Prazo"])
 
         df_filtrado = df.copy()
 
@@ -187,18 +207,28 @@ with aba1:
         if filtro_status != "Todos":
             df_filtrado = df_filtrado[df_filtrado["status"] == filtro_status]
 
+        if filtro_prazo != "Todas":
+            df_filtrado = df_filtrado[df_filtrado["alerta_prazo"] == filtro_prazo]
+
         st.markdown("---")
 
-        # Cards de Métricas
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        # Cards de Métricas (com destaque em vermelho para Em Atraso)
+        qtd_atrasadas = len(df[df["alerta_prazo"] == "🚨 Em Atraso"])
+        
+        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
         col_m1.metric("Exibindo", len(df_filtrado))
         col_m2.metric("A Fazer / Pendentes", len(df_filtrado[df_filtrado["status"].isin(["A Fazer", "Pendente / Bloqueada"])]))
         col_m3.metric("Em Andamento", len(df_filtrado[df_filtrado["status"] == "Em Andamento"]))
         col_m4.metric("Concluídas", len(df_filtrado[df_filtrado["status"] == "Concluída"]))
+        col_m5.metric("🚨 Em Atraso", qtd_atrasadas, delta=f"-{qtd_atrasadas}" if qtd_atrasadas > 0 else "0", delta_color="inverse")
         
         st.markdown("---")
 
         col_config = {
+            "alerta_prazo": st.column_config.TextColumn(
+                "Situação / Prazo",
+                help="Sinalização automática de vencimento",
+            ),
             "porcentagem": st.column_config.ProgressColumn(
                 "Progresso (%)",
                 help="Porcentagem de execução da tarefa",
@@ -208,7 +238,12 @@ with aba1:
             )
         }
         
-        st.dataframe(df_filtrado, use_container_width=True, column_config=col_config)
+        # Reordena colunas para destacar o alerta_prazo no início
+        colunas_ordem = ["id", "alerta_prazo", "titulo", "responsavel", "status", "deadline", "porcentagem", "prioridade", "tema"]
+        colunas_existentes = [c for c in colunas_ordem if c in df_filtrado.columns]
+        outras_colunas = [c for c in df_filtrado.columns if c not in colunas_existentes]
+        
+        st.dataframe(df_filtrado[colunas_existentes + outras_colunas], use_container_width=True, column_config=col_config)
     else:
         st.info("Nenhuma tarefa ativa encontrada.")
 
@@ -238,21 +273,21 @@ with aba2:
             st.altair_chart(chart_status, use_container_width=True)
             
         with col_g2:
-            st.markdown("##### ⚡ Tarefas por Prioridade")
-            chart_prio = alt.Chart(df_dash).mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5).encode(
-                x=alt.X("prioridade:N", title="Prioridade", sort=["Baixa", "Média", "Alta", "Urgente"]),
+            st.markdown("##### ⏳ Situação dos Prazos")
+            chart_prazo = alt.Chart(df_dash).mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5).encode(
+                x=alt.X("alerta_prazo:N", title="Situação", sort=["🚨 Em Atraso", "⚠️ Vence Hoje", "🟢 No Prazo", "✅ Concluída / Ok"]),
                 y=alt.Y("count(id):Q", title="Quantidade de Tarefas"),
                 color=alt.Color(
-                    "prioridade:N", 
+                    "alerta_prazo:N", 
                     scale=alt.Scale(
-                        domain=["Baixa", "Média", "Alta", "Urgente"],
-                        range=["#2ecc71", "#3498db", "#e67e22", "#e74c3c"]
+                        domain=["🚨 Em Atraso", "⚠️ Vence Hoje", "🟢 No Prazo", "✅ Concluída / Ok", "⚪ Sem Prazo"],
+                        range=["#e74c3c", "#f39c12", "#2ecc71", "#27ae60", "#95a5a6"]
                     ),
                     legend=None
                 ),
-                tooltip=["prioridade", alt.Tooltip("count(id)", title="Quantidade")]
+                tooltip=["alerta_prazo", alt.Tooltip("count(id)", title="Quantidade")]
             ).properties(height=320)
-            st.altair_chart(chart_prio, use_container_width=True)
+            st.altair_chart(chart_prazo, use_container_width=True)
 
         st.markdown("---")
         
@@ -280,7 +315,7 @@ with aba3:
             d_ini = st.date_input("Data de Início")
             prio = st.selectbox("Prioridade", ["Baixa", "Média", "Alta", "Urgente"])
         with col2:
-            tema = st.text_input("Tema / Projeto")
+            tema = st.text_input("Tema / Categoria")
             d_fim = st.date_input("Prazo (Deadline)")
         
         submitted = st.form_submit_button("Cadastrar Tarefa")
@@ -298,7 +333,7 @@ with aba4:
     
     if not df_atualizar.empty:
         opcoes_tarefas = {
-            f"#{row['id']} | {row['titulo']} ({row['responsavel']})": row 
+            f"#{row['id']} | {row['titulo']} ({row['responsavel']}) [{row.get('alerta_prazo', '')}]": row 
             for _, row in df_atualizar.iterrows()
         }
         
