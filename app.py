@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
+import smtplib
+from email.mime.text import MIMEText
 from datetime import datetime, date
 from supabase import create_client, Client
 
@@ -20,7 +22,33 @@ except Exception as e:
     st.error(f"Erro ao conectar com o Supabase: {e}")
     st.stop()
 
-# 3. FUNÇÕES DE BANCO DE DADOS
+# 3. FUNÇÃO PARA ENVIO DE E-MAILS (SMTP)
+def enviar_email(destinatario, assunto, corpo_html):
+    if not destinatario or "@" not in str(destinatario):
+        return False
+    try:
+        remetente = st.secrets.get("EMAIL_SENDER")
+        senha = st.secrets.get("EMAIL_PASSWORD")
+        servidor_smtp = st.secrets.get("SMTP_SERVER", "smtp.gmail.com")
+        porta_smtp = int(st.secrets.get("SMTP_PORT", 465))
+
+        if not remetente or not senha:
+            return False
+
+        msg = MIMEText(corpo_html, 'html', 'utf-8')
+        msg['Subject'] = assunto
+        msg['From'] = remetente
+        msg['To'] = destinatario
+
+        with smtplib.SMTP_SSL(servidor_smtp, porta_smtp) as server:
+            server.login(remetente, senha)
+            server.sendmail(remetente, destinatario, msg.as_string())
+        return True
+    except Exception as e:
+        print(f"Erro ao enviar e-mail para {destinatario}: {e}")
+        return False
+
+# 4. FUNÇÕES DE BANCO DE DADOS
 def carregar_tarefas(incluir_arquivadas=False):
     try:
         query = supabase.table("tarefas").select("*")
@@ -29,7 +57,6 @@ def carregar_tarefas(incluir_arquivadas=False):
         res = query.order("id", desc=True).execute()
         df_res = pd.DataFrame(res.data)
         
-        # Adiciona verificação visual de atraso
         if not df_res.empty and "deadline" in df_res.columns:
             hoje = date.today()
             def verificar_atraso(row):
@@ -74,12 +101,61 @@ def registrar_log(tarefa_id, titulo_tarefa, acao, responsavel_acao, detalhes):
     except Exception as e:
         print(f"Erro ao registrar log: {e}")
 
-def salvar_tarefa(titulo, descricao, responsavel, tema, data_inicio, deadline, prioridade, status="A Fazer"):
+# VERIFICAÇÃO AUTOMÁTICA DE TAREFAS VENCIDAS (1 AVISO POR SEMANA)
+def verificar_e_avisar_vencidos(df_tarefas):
+    if df_tarefas.empty or "alerta_prazo" not in df_tarefas.columns:
+        return
+    
+    hoje = date.today()
+    hoje_str = str(hoje)
+    vencidas = df_tarefas[df_tarefas["alerta_prazo"] == "🚨 Em Atraso"]
+    
+    for _, row in vencidas.iterrows():
+        email = row.get("email_responsavel")
+        ultimo_aviso_raw = row.get("ultimo_aviso_atraso")
+        
+        deve_enviar = False
+        
+        if not ultimo_aviso_raw or pd.isna(ultimo_aviso_raw):
+            deve_enviar = True
+        else:
+            try:
+                data_ultimo_aviso = datetime.strptime(str(ultimo_aviso_raw), "%Y-%m-%d").date()
+                dias_passados = (hoje - data_ultimo_aviso).days
+                if dias_passados >= 7:
+                    deve_enviar = True
+            except Exception:
+                deve_enviar = True
+
+        if email and "@" in str(email) and deve_enviar:
+            assunto = f"🚨 ALERTA SEMANAL DE ATRASO: Tarefa #{row['id']} - {row['titulo']}"
+            corpo = f"""
+            <h3>Atenção, {row['responsavel']}!</h3>
+            <p>A seguinte tarefa sob sua responsabilidade continua com o <b>prazo de conclusão vencido</b>:</p>
+            <ul>
+                <li><b>Tarefa:</b> {row['titulo']}</li>
+                <li><b>Tema / Categoria:</b> {row.get('tema', 'Não informado')}</li>
+                <li><b>Prazo limite (Deadline):</b> {row['deadline']}</li>
+                <li><b>Status atual:</b> {row['status']}</li>
+                <li><b>Progresso atual:</b> {row.get('porcentagem', 0)}%</li>
+            </ul>
+            <p>Lembrete semanal enviado pelo <b>Gerenciador de Tarefas do Setor</b>. Por favor, acesse o sistema para atualizar o andamento ou concluir a atividade.</p>
+            """
+            enviado = enviar_email(email, assunto, corpo)
+            if enviado:
+                try:
+                    supabase.table("tarefas").update({"ultimo_aviso_atraso": hoje_str}).eq("id", row['id']).execute()
+                    registrar_log(row['id'], row['titulo'], "AVISO E-MAIL (SEMANAL)", "SISTEMA", f"Alerta semanal de atraso enviado para {email}")
+                except Exception as e:
+                    print(f"Erro ao atualizar data de aviso: {e}")
+
+def salvar_tarefa(titulo, descricao, responsavel, email_resp, tema, data_inicio, deadline, prioridade, status="A Fazer"):
     try:
         dados = {
             "titulo": titulo,
             "descricao": descricao,
             "responsavel": responsavel,
+            "email_responsavel": email_resp,
             "tema": tema,
             "data_inicio": str(data_inicio),
             "deadline": str(deadline),
@@ -88,8 +164,8 @@ def salvar_tarefa(titulo, descricao, responsavel, tema, data_inicio, deadline, p
             "porcentagem": 0
         }
         res = supabase.table("tarefas").insert(dados).execute()
-        
         nova_id = res.data[0]['id'] if res.data else None
+        
         registrar_log(
             nova_id, 
             titulo, 
@@ -124,14 +200,7 @@ def atualizar_tarefa(id_tarefa, titulo_tarefa, novo_status, nova_porcentagem, us
 def arquivar_tarefa(id_tarefa, titulo_tarefa, usuario_acao):
     try:
         supabase.table("tarefas").update({"status": "Arquivada"}).eq("id", id_tarefa).execute()
-        
-        registrar_log(
-            id_tarefa, 
-            titulo_tarefa, 
-            "ARQUIVAMENTO", 
-            usuario_acao, 
-            "Tarefa arquivada e removida do painel principal."
-        )
+        registrar_log(id_tarefa, titulo_tarefa, "ARQUIVAMENTO", usuario_acao, "Tarefa arquivada.")
         st.success(f"Tarefa #{id_tarefa} arquivada com sucesso!")
     except Exception as e:
         st.error(f"Erro ao arquivar tarefa: {e}")
@@ -139,22 +208,14 @@ def arquivar_tarefa(id_tarefa, titulo_tarefa, usuario_acao):
 def excluir_tarefa(id_tarefa, titulo_tarefa, usuario_acao):
     try:
         supabase.table("tarefas").delete().eq("id", id_tarefa).execute()
-        
-        registrar_log(
-            id_tarefa, 
-            titulo_tarefa, 
-            "EXCLUSÃO PERMANENTE", 
-            usuario_acao, 
-            "Tarefa excluída definitivamente do banco de dados."
-        )
+        registrar_log(id_tarefa, titulo_tarefa, "EXCLUSÃO PERMANENTE", usuario_acao, "Tarefa excluída.")
         st.success(f"Tarefa #{id_tarefa} excluída permanentemente!")
     except Exception as e:
         st.error(f"Erro ao excluir tarefa: {e}")
 
-# 4. INTERFACE DO APLICATIVO
+# 5. INTERFACE DO APLICATIVO
 st.title("📋 Gerenciador de Tarefas do Setor")
 
-# Menu de Navegação / Abas
 aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs([
     "📌 Painel de Tarefas", 
     "📊 Dashboard / Gráficos", 
@@ -164,29 +225,26 @@ aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs([
     "📜 Relatório de Auditoria"
 ])
 
-# ABA 1: PAINEL DE TAREFAS (COM ALERTA DE ATRASO)
+# ABA 1: PAINEL DE TAREFAS
 with aba1:
     df = carregar_tarefas()
     if not df.empty:
-        st.subheader("🔍 Filtros e Busca")
+        verificar_e_avisar_vencidos(df)
         
+        st.subheader("🔍 Filtros e Busca")
         col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns(5)
         
         with col_f1:
             busca = st.text_input("🔎 Palavra-chave", placeholder="Ex: relatório...")
-        
         with col_f2:
             lista_responsaveis = ["Todos"] + sorted(list(df["responsavel"].dropna().unique()))
             filtro_resp = st.selectbox("👤 Responsável", lista_responsaveis)
-            
         with col_f3:
             lista_prioridades = ["Todas", "Baixa", "Média", "Alta", "Urgente"]
             filtro_prio = st.selectbox("⚡ Prioridade", lista_prioridades)
-
         with col_f4:
             lista_status = ["Todos", "A Fazer", "Em Andamento", "Pendente / Bloqueada", "Concluída"]
             filtro_status = st.selectbox("📌 Status", lista_status)
-
         with col_f5:
             filtro_prazo = st.selectbox("⏳ Situação do Prazo", ["Todas", "🚨 Em Atraso", "⚠️ Vence Hoje", "🟢 No Prazo"])
 
@@ -212,7 +270,6 @@ with aba1:
 
         st.markdown("---")
 
-        # Cards de Métricas (com destaque em vermelho para Em Atraso)
         qtd_atrasadas = len(df[df["alerta_prazo"] == "🚨 Em Atraso"])
         
         col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
@@ -225,21 +282,14 @@ with aba1:
         st.markdown("---")
 
         col_config = {
-            "alerta_prazo": st.column_config.TextColumn(
-                "Situação / Prazo",
-                help="Sinalização automática de vencimento",
-            ),
+            "alerta_prazo": st.column_config.TextColumn("Situação / Prazo"),
+            "email_responsavel": st.column_config.TextColumn("E-mail Responsável"),
             "porcentagem": st.column_config.ProgressColumn(
-                "Progresso (%)",
-                help="Porcentagem de execução da tarefa",
-                format="%d%%",
-                min_value=0,
-                max_value=100,
+                "Progresso (%)", format="%d%%", min_value=0, max_value=100,
             )
         }
         
-        # Reordena colunas para destacar o alerta_prazo no início
-        colunas_ordem = ["id", "alerta_prazo", "titulo", "responsavel", "status", "deadline", "porcentagem", "prioridade", "tema"]
+        colunas_ordem = ["id", "alerta_prazo", "titulo", "responsavel", "email_responsavel", "status", "deadline", "porcentagem", "prioridade", "tema"]
         colunas_existentes = [c for c in colunas_ordem if c in df_filtrado.columns]
         outras_colunas = [c for c in df_filtrado.columns if c not in colunas_existentes]
         
@@ -247,7 +297,7 @@ with aba1:
     else:
         st.info("Nenhuma tarefa ativa encontrada.")
 
-# ABA 2: DASHBOARD E GRÁFICOS VISUAIS
+# ABA 2: DASHBOARD
 with aba2:
     st.subheader("📊 Indicadores Visuais do Setor")
     df_dash = carregar_tarefas()
@@ -265,8 +315,7 @@ with aba2:
                     scale=alt.Scale(
                         domain=["A Fazer", "Em Andamento", "Pendente / Bloqueada", "Concluída"],
                         range=["#1f77b4", "#ff7f0e", "#d62728", "#2ca02c"]
-                    ),
-                    title="Status"
+                    )
                 ),
                 tooltip=["status", alt.Tooltip("count(id)", title="Quantidade")]
             ).properties(height=320)
@@ -288,18 +337,6 @@ with aba2:
                 tooltip=["alerta_prazo", alt.Tooltip("count(id)", title="Quantidade")]
             ).properties(height=320)
             st.altair_chart(chart_prazo, use_container_width=True)
-
-        st.markdown("---")
-        
-        st.markdown("##### 👤 Carga de Trabalho por Responsável")
-        chart_resp = alt.Chart(df_dash).mark_bar().encode(
-            x=alt.X("responsavel:N", title="Responsável"),
-            y=alt.Y("count(id):Q", title="Total de Tarefas"),
-            color=alt.Color("status:N", title="Status"),
-            tooltip=["responsavel", "status", alt.Tooltip("count(id)", title="Quantidade")]
-        ).properties(height=350)
-        st.altair_chart(chart_resp, use_container_width=True)
-        
     else:
         st.info("Nenhuma tarefa disponível para gerar gráficos.")
 
@@ -311,7 +348,8 @@ with aba3:
         desc = st.text_area("Descrição")
         col1, col2 = st.columns(2)
         with col1:
-            resp = st.text_input("Responsável *")
+            resp = st.text_input("Nome do Responsável *")
+            email_resp = st.text_input("E-mail do Responsável (para alerta de atraso)")
             d_ini = st.date_input("Data de Início")
             prio = st.selectbox("Prioridade", ["Baixa", "Média", "Alta", "Urgente"])
         with col2:
@@ -321,7 +359,7 @@ with aba3:
         submitted = st.form_submit_button("Cadastrar Tarefa")
         if submitted:
             if tit and resp:
-                salvar_tarefa(tit, desc, resp, tema, d_ini, d_fim, prio, "A Fazer")
+                salvar_tarefa(tit, desc, resp, email_resp, tema, d_ini, d_fim, prio, "A Fazer")
                 st.rerun()
             else:
                 st.error("Por favor, preencha os campos obrigatórios (*).")
@@ -333,7 +371,7 @@ with aba4:
     
     if not df_atualizar.empty:
         opcoes_tarefas = {
-            f"#{row['id']} | {row['titulo']} ({row['responsavel']}) [{row.get('alerta_prazo', '')}]": row 
+            f"#{row['id']} | {row['titulo']} ({row['responsavel']})": row 
             for _, row in df_atualizar.iterrows()
         }
         
@@ -344,20 +382,15 @@ with aba4:
         
         if tarefa_selecionada_label:
             dados_tarefa = opcoes_tarefas[tarefa_selecionada_label]
-            
             st.info(f"**Descrição atual:** {dados_tarefa.get('descricao', 'Sem descrição')}")
             
             with st.form("form_atualizar_tarefa"):
-                usuario_acao = st.text_input("Seu Nome / Identificação (Quem está realizando a alteração) *")
-                
+                usuario_acao = st.text_input("Seu Nome / Identificação *")
                 c1, c2 = st.columns(2)
-                
                 with c1:
                     status_opcoes = ["A Fazer", "Em Andamento", "Pendente / Bloqueada", "Concluída"]
                     status_index = status_opcoes.index(dados_tarefa['status']) if dados_tarefa['status'] in status_opcoes else 0
-                    
                     novo_status = st.selectbox("Status Atual", options=status_opcoes, index=status_index)
-                
                 with c2:
                     val_porcentagem = int(dados_tarefa['porcentagem']) if pd.notnull(dados_tarefa['porcentagem']) else 0
                     nova_porcentagem = st.slider("Porcentagem de Conclusão", min_value=0, max_value=100, value=val_porcentagem, step=5)
@@ -369,7 +402,7 @@ with aba4:
                         atualizar_tarefa(dados_tarefa['id'], dados_tarefa['titulo'], novo_status, nova_porcentagem, usuario_acao, novo_historico)
                         st.rerun()
                     else:
-                        st.error("Por favor, informe seu nome para registrar a alteração no relatório de auditoria.")
+                        st.error("Por favor, informe seu nome.")
     else:
         st.info("Nenhuma tarefa disponível para atualização.")
 
@@ -383,33 +416,22 @@ with aba5:
             f"#{row['id']} | {row['titulo']} [{row['status']}]": row 
             for _, row in df_gestao.iterrows()
         }
-        
-        tarefa_gestao_label = st.selectbox(
-            "Selecione a tarefa:",
-            options=list(opcoes_gestao.keys()),
-            key="select_gestao"
-        )
+        tarefa_gestao_label = st.selectbox("Selecione a tarefa:", options=list(opcoes_gestao.keys()), key="select_gestao")
         
         if tarefa_gestao_label:
             dados_g = opcoes_gestao[tarefa_gestao_label]
-            st.warning(f"**Tarefa selecionada:** #{dados_g['id']} - {dados_g['titulo']} (Status atual: {dados_g['status']})")
-            
+            st.warning(f"**Tarefa selecionada:** #{dados_g['id']} - {dados_g['titulo']}")
             usuario_gestao = st.text_input("Seu Nome / Identificação *", key="usr_gestao")
             
             col_b1, col_b2 = st.columns(2)
-            
             with col_b1:
-                st.markdown("##### 📁 Arquivar Tarefa")
-                st.caption("Remove a tarefa do painel principal sem apagar do banco de dados.")
                 if st.button("📦 Arquivar Tarefa", use_container_width=True):
                     if usuario_gestao.strip():
                         arquivar_tarefa(dados_g['id'], dados_g['titulo'], usuario_gestao)
                         st.rerun()
                     else:
                         st.error("Por favor, informe seu nome.")
-                    
             with col_b2:
-                st.markdown("##### ❌ Excluir Permanentemente")
                 confirmar = st.checkbox(f"Confirmo a exclusão definitiva da tarefa #{dados_g['id']}")
                 if st.button("🗑️ Excluir Tarefa", type="primary", use_container_width=True, disabled=not confirmar):
                     if usuario_gestao.strip():
@@ -420,20 +442,11 @@ with aba5:
     else:
         st.info("Nenhuma tarefa disponível para exclusão ou arquivamento.")
 
-# ABA 6: RELATÓRIO DE AUDITORIA / LOGS
+# ABA 6: AUDITORIA
 with aba6:
     st.subheader("📜 Histórico Geral de Alterações e Exclusões")
     df_logs = carregar_logs()
-    
     if not df_logs.empty:
-        col_l1, col_l2 = st.columns(2)
-        with col_l1:
-            filtro_acao = st.selectbox("Filtrar por Ação", ["Todas", "CRIAÇÃO", "ATUALIZAÇÃO", "ARQUIVAMENTO", "EXCLUSÃO PERMANENTE"])
-        
-        df_logs_filtrado = df_logs.copy()
-        if filtro_acao != "Todas":
-            df_logs_filtrado = df_logs_filtrado[df_logs_filtrado["acao"].str.contains(filtro_acao, na=False)]
-            
-        st.dataframe(df_logs_filtrado, use_container_width=True)
+        st.dataframe(df_logs, use_container_width=True)
     else:
         st.info("Nenhuma alteração registrada até o momento.")
